@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  pdf-chatbot:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - PYTHONUNBUFFERED=1
+      - TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata/
+      - ANONYMIZED_TELEMETRY=False
+    volumes:
+      - chroma_data:/app/chroma_db
+      - uploads_data:/app/uploads
+      - extracted_text_data:/app/extracted_text
+      - ./static:/app/static:ro
+      - ./templates:/app/templates:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - pdf-chatbot-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+networks:
+  pdf-chatbot-network:
+    driver: bridge
+
+volumes:
+  chroma_data:
+    driver: local
+  uploads_data:
+    driver: local
+  extracted_text_data:
+    driver: local
+

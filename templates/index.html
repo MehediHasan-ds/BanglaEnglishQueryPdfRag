@@ -1,0 +1,95 @@
+<!-- templates/index.html -->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Chatbot - Bengali & English</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>📄 PDF Chatbot</h1>
+            <p>Upload your PDF and chat with it in Bengali or English</p>
+        </header>
+
+        <div class="upload-section">
+            <div class="upload-card">
+                <h2>Upload PDF</h2>
+                <form id="uploadForm" enctype="multipart/form-data">
+                    <div class="file-input-wrapper">
+                        <input type="file" id="pdfFile" name="file" accept=".pdf" required>
+                        <label for="pdfFile" class="file-input-label">
+                            <span class="file-icon">📁</span>
+                            <span class="file-text">Choose PDF File</span>
+                        </label>
+                    </div>
+                    
+                    <div class="language-selection">
+                        <label>Select PDF Language:</label>
+                        <div class="radio-group">
+                            <label class="radio-label">
+                                <input type="radio" name="language" value="bengali" checked>
+                                <span class="radio-custom"></span>
+                                Bengali (বাংলা)
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="language" value="english">
+                                <span class="radio-custom"></span>
+                                English
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <button type="submit" class="upload-btn" id="uploadBtn">
+                        <span class="btn-text">Upload & Process</span>
+                        <div class="loader" id="uploadLoader"></div>
+                    </button>
+                </form>
+                
+                <div id="uploadStatus" class="status-message"></div>
+            </div>
+        </div>
+
+        <div class="chat-section" id="chatSection" style="display: none;">
+            <div class="chat-container">
+                <div class="chat-header">
+                    <h3>💬 Chat with your PDF</h3>
+                    <div class="chat-info" id="chatInfo"></div>
+                </div>
+                
+                <div class="chat-messages" id="chatMessages">
+                    <div class="welcome-message">
+                        <div class="bot-avatar">💬</div>
+                        <div class="message-content">
+                            <p>Hello! I've processed your PDF. You can now ask me questions about its content in Bengali or English.</p>
+                            <p class="bengali-text">হ্যালো! আমি আপনার PDF প্রসেস করেছি। এখন আপনি এর বিষয়বস্তু সম্পর্কে বাংলা বা ইংরেজিতে প্রশ্ন করতে পারেন।</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="chat-input-container">
+                    <form id="chatForm">
+                        <div class="input-wrapper">
+                            <input 
+                                type="text" 
+                                id="questionInput" 
+                                placeholder="Ask a question about your PDF... / আপনার PDF সম্পর্কে প্রশ্ন করুন..."
+                                required
+                            >
+                            <button type="submit" class="send-btn" id="sendBtn">
+                                <span class="send-icon">➤</span>
+                                <div class="loader small" id="chatLoader"></div>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
