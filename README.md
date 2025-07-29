@@ -6,7 +6,7 @@ An advanced **Retrieval-Augmented Generation (RAG)** system that enables intelli
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.104-green)
 ![LangChain](https://img.shields.io/badge/LangChain-0.1.0-orange)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
-
+![User Interface](UI.png)
 ## Key Features
 
 ### Core Capabilities
