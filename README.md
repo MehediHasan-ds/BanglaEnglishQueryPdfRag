@@ -93,7 +93,7 @@ PDF Upload → OCR Processing → Text Extraction → Chunking → Vector Embedd
 
 1. **Clone Repository**
 ```bash
-git clone <repository-url>
+git clone https://github.com/MehediHasan-ds/BanglaEnglishQueryPdfRag.git
 cd pdf-chatbot
 ```
 
