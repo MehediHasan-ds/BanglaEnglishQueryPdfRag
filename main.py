@@ -10,16 +10,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 import pytesseract
-from PIL import Image
 import cv2
 from pdf2image import convert_from_path
 import numpy as np
 import re
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from contextlib import asynccontextmanager
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
-from langchain.chains import RetrievalQA
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
 from dotenv import load_dotenv
@@ -34,7 +33,28 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-app = FastAPI()
+# Global variable to cache the embeddings model
+_global_embeddings = None
+
+# FastAPI lifespan to initialize and cleanup resources
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _global_embeddings
+    # Startup: Initialize the embeddings model
+    logger.info("Initializing global embeddings model...")
+    _global_embeddings = HuggingFaceEmbeddings(
+        model_name="shihab17/bangla-sentence-transformer",
+        model_kwargs={'device': 'cpu'}
+    )
+    logger.info("✅ Global embeddings model initialized")
+    yield
+    # Shutdown: Clean up if needed
+    logger.info("Shutting down, cleaning up embeddings model...")
+    _global_embeddings = None
+
+# Initialize FastAPI app with lifespan
+app = FastAPI(lifespan=lifespan)
+
 
 # Add CORS middleware
 app.add_middleware(
@@ -86,16 +106,18 @@ def initialize_llm():
     
     return ChatGroq(
         api_key=groq_api_key,
-        model="llama3-8b-8192",
-        temperature=0.1
+        model=os.getenv("MODEL_NAME"),
+        temperature=0.2
     )
 
+
 def get_embeddings():
-    """Get embeddings model - Created fresh each time."""
-    return HuggingFaceEmbeddings(
-        model_name="shihab17/bangla-sentence-transformer",
-        model_kwargs={'device': 'cpu'}
-    )
+    """Return the cached embeddings model."""
+    global _global_embeddings
+    if _global_embeddings is None:
+        raise RuntimeError("Embeddings model not initialized")
+    return _global_embeddings
+
 
 def extract_text_from_image(image, language="bengali"):
     """Extract text from a single image."""
@@ -204,8 +226,8 @@ def create_vectorstore_only(txt_file_path, language):
         
         # OPTIMIZED CHUNKING STRATEGY
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,        # REDUCED from 1000 - smaller chunks
-            chunk_overlap=100,     # REDUCED from 200 - less overlap
+            chunk_size=300,        # REDUCED from 1000 - smaller chunks
+            chunk_overlap=50,     # REDUCED from 200 - less overlap
             length_function=len,
             separators=["\n\n", "\n", "।", ".", " ", ""]
         )
@@ -250,20 +272,25 @@ def create_vectorstore_only(txt_file_path, language):
         raise HTTPException(status_code=500, detail=f"Error creating vectorstore: {str(e)}")
 
 def load_vectorstore(collection_name, persist_directory):
-    """
-    Load existing vectorstore from disk.
-    Called fresh for each chat request.
-    """
+    """Load existing vectorstore from disk - FIXED VERSION"""
     try:
         embeddings = get_embeddings()
         
+        # FIXED: Use proper loading method
         vectorstore = Chroma(
-            collection_name=collection_name,
+            persist_directory=persist_directory,
             embedding_function=embeddings,
-            persist_directory=persist_directory
+            collection_name=collection_name
         )
         
-        logger.info(f"✅ VECTORSTORE LOADED: Collection {collection_name}")
+        # CRITICAL: Verify collection exists and has data
+        collection = vectorstore._collection
+        count = collection.count()
+        logger.info(f"✅ VECTORSTORE LOADED: Collection {collection_name} with {count} documents")
+        
+        if count == 0:
+            raise Exception(f"Collection {collection_name} is empty!")
+            
         return vectorstore
         
     except Exception as e:
@@ -276,16 +303,16 @@ def create_prompt_template(language):
     """
     if language == "bengali":
         # SHORTENED Bengali prompt
-        system_prompt = """PDF থেকে উত্তর দিন। প্রসঙ্গে না পেলে "উত্তর পাওয়া যায়নি" বলুন।
+        system_prompt = """Answer the questions based on the information below. Even if the question is not directly answered in the text, provide the best possible answer based on relevant information. If an answer is not possible, then state 'Relevant information not found' and explain why. Reply everything in bangla only. No other language is expected.
 
-প্রসঙ্গ:
+Information in Bangla:
 {context}
 
-প্রশ্ন: {question}
-উত্তর:"""
+Question in Bangla: {question}
+Answer In Bangla:"""
     else:
         # SHORTENED English prompt
-        system_prompt = """Answer from PDF content. Say "Answer not found" if not in context.
+        system_prompt = """Answer the question based on the PDF content. If the answer is not directly in the context, provide the best possible response using relevant information. If no answer is possible, say "No relevant information found" and explain why.
 
 Context:
 {context}
@@ -298,60 +325,72 @@ Answer:"""
         template=system_prompt
     )
 
-def smart_context_selection(retriever, question, max_context_tokens=1500):
-    """
-    SMART CONTEXT MANAGEMENT: Select best chunks within token limit
-    """
+def smart_context_selection(retriever, question, max_context_tokens=700):
+    """ENHANCED: Better context selection with debugging"""
     try:
-        # Get more candidates initially
-        candidate_docs = retriever.get_relevant_documents(question)
+        logger.info(f"🔍 SEARCHING FOR: {question[:100]}...")
         
-        if not candidate_docs:
-            logger.warning("No documents retrieved!")
+        # Get candidates with error handling
+        try:
+            candidate_docs = retriever.get_relevant_documents(question)
+        except Exception as e:
+            logger.error(f"❌ RETRIEVAL FAILED: {e}")
             return "", []
         
-        logger.info(f"Retrieved {len(candidate_docs)} candidate documents")
+        if not candidate_docs:
+            logger.warning("❌ NO DOCUMENTS RETRIEVED!")
+            return "", []
         
-        # INTELLIGENT SELECTION STRATEGY
+        logger.info(f"📄 RETRIEVED {len(candidate_docs)} candidate documents")
+        
+        # Debug: Log first few chunks
+        for i, doc in enumerate(candidate_docs[:3]):
+            preview = doc.page_content[:200].replace('\n', ' ')
+            logger.info(f"📝 Chunk {i}: {preview}...")
+        
+        # IMPROVED SELECTION
         selected_chunks = []
         total_tokens = 0
         
-        # Sort by relevance (assuming first docs are most relevant)
         for i, doc in enumerate(candidate_docs):
-            chunk_text = doc.page_content
+            chunk_text = doc.page_content.strip()
+            if not chunk_text:
+                continue
+                
             chunk_tokens = count_tokens(chunk_text)
             
-            # Skip if chunk alone exceeds limit
+            # Handle oversized chunks
             if chunk_tokens > max_context_tokens:
-                logger.warning(f"Chunk {i} too large ({chunk_tokens} tokens), truncating...")
-                # Truncate large chunk
-                chunk_text = chunk_text[:max_context_tokens * 3]  # Rough char limit
+                logger.warning(f"⚠️ Chunk {i} too large ({chunk_tokens} tokens), truncating...")
+                # Keep first part of chunk
+                words = chunk_text.split()
+                truncated_words = words[:max_context_tokens//4]  # Rough estimate
+                chunk_text = ' '.join(truncated_words)
                 chunk_tokens = count_tokens(chunk_text)
             
-            # Add if within total limit
+            # Add if within limit
             if total_tokens + chunk_tokens <= max_context_tokens:
                 selected_chunks.append(chunk_text)
                 total_tokens += chunk_tokens
                 logger.info(f"✅ Added chunk {i}: {chunk_tokens} tokens (Total: {total_tokens})")
             else:
-                logger.info(f"❌ Skipped chunk {i}: would exceed limit")
+                logger.info(f"❌ Skipping chunk {i}: would exceed limit ({total_tokens + chunk_tokens} > {max_context_tokens})")
                 break
         
-        # Combine selected chunks
-        if selected_chunks:
-            context = "\n\n".join(selected_chunks)
-            logger.info(f"✅ FINAL CONTEXT: {total_tokens} tokens, {len(selected_chunks)} chunks")
-            return context, candidate_docs[:len(selected_chunks)]
-        else:
-            # Fallback: use first chunk only, truncated
-            first_chunk = candidate_docs[0].page_content
-            truncated = first_chunk[:max_context_tokens * 3]  # Rough truncation
-            logger.warning(f"⚠️ FALLBACK: Using truncated first chunk")
-            return truncated, [candidate_docs[0]]
-            
+        if not selected_chunks:
+            logger.error("❌ NO CHUNKS SELECTED!")
+            return "", []
+        
+        # Combine context
+        context = "\n\n---\n\n".join(selected_chunks)  # Better separator
+        logger.info(f"✅ FINAL CONTEXT: {total_tokens} tokens, {len(selected_chunks)} chunks")
+        
+        return context, candidate_docs[:len(selected_chunks)]
+        
     except Exception as e:
-        logger.error(f"Error in smart context selection: {str(e)}")
+        logger.error(f"❌ CONTEXT SELECTION ERROR: {str(e)}")
         return "", []
+
 
 def create_qa_chain_with_context_management(collection_name, persist_directory, language):
     """
@@ -362,11 +401,21 @@ def create_qa_chain_with_context_management(collection_name, persist_directory, 
         
         # Load vectorstore and create retriever
         vectorstore = load_vectorstore(collection_name, persist_directory)
+        # IMPROVED: Better retriever configuration
         retriever = vectorstore.as_retriever(
             search_type="similarity",
-            search_kwargs={"k": 10}  # Get more candidates for smart selection
+            search_kwargs={
+                "k": 3 # Reasonable number of candidates
+            }
         )
-        
+
+        # TEST: Verify retriever works
+        try:
+            test_docs = retriever.get_relevant_documents("test")
+            logger.info(f"✅ RETRIEVER TEST: Found {len(test_docs)} documents")
+        except Exception as e:
+            logger.error(f"❌ RETRIEVER TEST FAILED: {e}")
+                
         # Create components
         prompt_template = create_prompt_template(language)
         llm = initialize_llm()
@@ -395,7 +444,7 @@ def process_question_with_context_management(qa_components, question):
         context, source_docs = smart_context_selection(
             qa_components["retriever"], 
             question, 
-            max_context_tokens=1500  # Adjust based on your model's limit
+            max_context_tokens=2000  # Adjust based on your model's limit
         )
         
         if not context:
@@ -416,7 +465,7 @@ def process_question_with_context_management(qa_components, question):
         logger.info(f"📊 FINAL PROMPT: {prompt_tokens} tokens")
         
         # Safety check - if still too long, truncate context further
-        if prompt_tokens > 3000:  # Conservative limit for Llama3-8B
+        if prompt_tokens > 1000:  # Conservative limit for Llama3-8B
             logger.warning(f"⚠️ Prompt still too long ({prompt_tokens} tokens), truncating context...")
             
             # Drastically reduce context
@@ -452,6 +501,33 @@ def process_question_with_context_management(qa_components, question):
             return f"প্রশ্ন প্রক্রিয়াকরণে ত্রুটি: {str(e)}", []
         else:
             return f"Error processing question: {str(e)}", []
+
+
+
+def verify_vectorstore_health(collection_name, persist_directory):
+    """Verify vectorstore is working properly"""
+    try:
+        vectorstore = load_vectorstore(collection_name, persist_directory)
+        
+        # Test basic functionality
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
+        test_docs = retriever.get_relevant_documents("test query")
+        
+        logger.info(f"🔍 VECTORSTORE HEALTH CHECK: {len(test_docs)} docs retrieved")
+        
+        if test_docs:
+            sample_content = test_docs[0].page_content[:100]
+            logger.info(f"📄 SAMPLE CONTENT: {sample_content}...")
+            return True
+        else:
+            logger.error("❌ VECTORSTORE HEALTH CHECK FAILED: No documents found")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ VECTORSTORE HEALTH CHECK ERROR: {e}")
+        return False
+    
+
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
@@ -542,6 +618,18 @@ async def chat(request: Request):
             raise HTTPException(status_code=400, detail="Question cannot be empty")
         
         logger.info(f"🚀 PROCESSING QUESTION: {question}")
+        
+        try:
+            # ADD THIS: Verify vectorstore health
+            is_healthy = verify_vectorstore_health(
+                current_vectorstore_info["collection_name"],
+                current_vectorstore_info["persist_directory"]
+            )
+            
+            if not is_healthy:
+                raise HTTPException(status_code=500, detail="Vectorstore is not functioning properly")
+        except HTTPException:
+            raise
         
         # Create QA components with context management
         qa_components = create_qa_chain_with_context_management(
